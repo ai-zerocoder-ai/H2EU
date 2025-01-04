@@ -8,7 +8,6 @@ import os
 import logging
 import time
 import random
-from openai import OpenAIError, RateLimitError
 from urllib.parse import urlparse, urlunparse
 import hashlib
 
@@ -48,7 +47,7 @@ today_date = datetime.now().strftime('%Y-%m-%d')  # Текущая дата в �
 try:
     with open(csv_file, 'x', newline='', encoding='utf-8') as file:
         writer = csv.writer(file)
-        writer.writerow(['data_key', 'title', 'translated_title', 'summary', 'post_url', 'parsed_date'])
+        writer.writerow(['data_key', 'title', 'translated_title', 'post_url', 'parsed_date'])
         logging.info(f"Создан новый CSV-файл {csv_file} с заголовками.")
 except FileExistsError:
     logging.info(f"CSV-файл {csv_file} уже существует.")
@@ -84,7 +83,7 @@ def clean_old_entries():
 
         # Перезаписываем файл только с актуальными записями
         with open(csv_file, 'w', newline='', encoding='utf-8') as file:
-            writer = csv.DictWriter(file, fieldnames=['data_key', 'title', 'translated_title', 'summary', 'post_url', 'parsed_date'])
+            writer = csv.DictWriter(file, fieldnames=['data_key', 'title', 'translated_title', 'post_url', 'parsed_date'])
             writer.writeheader()
             writer.writerows(rows_to_keep)
         logging.info("Очистка завершена.")
@@ -93,7 +92,7 @@ def clean_old_entries():
 
 # Функция парсинга новостей
 def fetch_news():
-    base_url = "https://climaterealism.com/"
+    base_url = "https://hydrogeneurope.eu/"
     logging.info(f"Запрос к основному URL: {base_url}")
     try:
         response = scraper.get(base_url, timeout=10)
@@ -102,7 +101,7 @@ def fetch_news():
             return
 
         soup = BeautifulSoup(response.content, "html.parser")
-        news_items = soup.find_all('h3', class_='entry-title td-module-title')  # Класс заголовков статей
+        news_items = soup.find_all('h6', class_='entry-title ')  # Класс заголовков статей
         logging.info(f"Найдено {len(news_items)} новостей.")
 
         if not news_items:
@@ -141,15 +140,15 @@ def fetch_news():
                     logging.warning(f"Полный текст для статьи {post_url} не был получен. Пропуск.")
                     continue
 
-                # Создаём перевод и выжимку с GPT-4
-                translated_title, summary = summarize_with_gpt(title, full_text)
-                if not translated_title or not summary:
-                    logging.warning(f"Не удалось получить перевод или выжимку для статьи {post_url}. Пропуск.")
+                # Создаём перевод заголовка
+                translated_title = translate_with_gpt(title, full_text)
+                if not translated_title:
+                    logging.warning(f"Не удалось получить перевод для статьи {post_url}. Пропуск.")
                     continue
 
                 # Записываем данные в CSV
                 try:
-                    writer.writerow([data_key, title, translated_title, summary, post_url, today_date])
+                    writer.writerow([data_key, title, translated_title, post_url, today_date])
                     logging.info(f"Добавлена новость: {title} (перевод: {translated_title})")
                     existing_keys.add(data_key)  # Добавляем ключ в существующие после записи
                 except Exception as e:
@@ -173,19 +172,9 @@ def fetch_full_text(url):
 
         soup = BeautifulSoup(response.content, "html.parser")
 
-        # Используем CSS селектор для поиска div с двумя классами
-        content_div = soup.find('body')  # Поиск всего текста на странице
+        # Класс текста статьи
+        content_div = soup.find('div', class_='the_content_wrapper ')
         paragraphs = content_div.find_all('p') if content_div else []
-        if not content_div:
-            logging.error(f"Контейнер с текстом статьи не найден для {url}.")
-
-            # Сохранение HTML для анализа
-            with open("error_article.html", "w", encoding="utf-8") as f:
-                f.write(response.text)
-            logging.info(f"HTML статьи {url} сохранён в error_article.html для проверки.")
-            return ""
-
-        paragraphs = content_div.find_all('p')
         if not paragraphs:
             logging.error(f"Нет параграфов в статье {url}.")
             return ""
@@ -198,50 +187,19 @@ def fetch_full_text(url):
         logging.error(f"Ошибка при парсинге текста статьи {url}: {e}")
         return ""
 
-# Функция для перевода заголовка и создания выжимки текста
-def summarize_with_gpt(title, full_text):
+
+# Функция для перевода заголовка
+def translate_with_gpt(title, full_text):
     try:
-        # Сначала создаем выжимку на основе полного текста
-        prompt_summary = f"""
-        Вы работаете как эксперт в области анализа текстов. Создайте выжимку из текста статьи на английском языке (не более 500 слов). Выжимка должна быть краткой, но содержать ключевые идеи статьи.
+        prompt_translation = f"""
+        Ты самый лучший переводчик с английского языка на русский язык. Переведите текст ниже на русский язык.
 
         Заголовок: {title}
-
         Текст статьи: {full_text}
 
-        Ответьте в формате:
-        Выжимка статьи:
-        """
-        logging.info("Отправка запроса к GPT-4 для выжимки...")
-        response_summary = openai.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "user", "content": prompt_summary}],
-            temperature=0.7,
-        )
-        logging.info("Ответ от GPT-4 для выжимки получен.")
-
-        summary_en = response_summary.choices[0].message.content.strip()
-        if not summary_en.startswith("Выжимка статьи:"):
-            logging.error("Формат ответа GPT-4 для выжимки неожиданен.")
-            return None, None
-
-        summary_en = summary_en.replace("Выжимка статьи:", "").strip()
-        logging.info(f"Получена выжимка статьи на английском: {len(summary_en)} символов.")
-
-        # Затем переводим заголовок и выжимку на русский язык
-        prompt_translation = f"""
-        Вы работаете как эксперт в области перевода. Переведите текст ниже на русский язык.
-
-        Заголовок: {title}
-
-        Выжимка статьи: {summary_en}
-
-        Ответьте в формате:
-        1. Переведенный заголовок:
-        2. Переведенная выжимка:
         """
         logging.info("Отправка запроса к GPT-4 для перевода...")
-        response_translation = openai.chat.completions.create(
+        response_translation = openai.ChatCompletion.create(
             model="gpt-4o",
             messages=[{"role": "user", "content": prompt_translation}],
             temperature=0.2,
@@ -249,30 +207,11 @@ def summarize_with_gpt(title, full_text):
         logging.info("Ответ от GPT-4 для перевода получен.")
 
         output = response_translation.choices[0].message.content.strip()
-        logging.debug(f"Ответ GPT-4 для перевода: {output}")
+        return output.replace("Перевод:", "").strip()
 
-        if "2. Переведенная выжимка:" not in output:
-            logging.error("Формат ответа GPT-4 для перевода неожиданен.")
-            return None, None
-
-        translated_title, translated_summary = output.split("2. Переведенная выжимка:", 1)
-        translated_title = translated_title.replace("1. Переведенный заголовок:", "").strip()
-        translated_summary = translated_summary.strip()
-
-        logging.info(f"Получен перевод заголовка: {translated_title}")
-        logging.info(f"Получена переведенная выжимка статьи: {len(translated_summary)} символов.")
-
-        return translated_title, translated_summary
-
-    except RateLimitError:
-        logging.error("Превышен лимит запросов к OpenAI API.")
-        return "Перевод недоступен", "Краткое содержание недоступно"
-    except OpenAIError as e:
-        logging.error(f"Ошибка при работе с OpenAI API: {e}")
-        return "Перевод недоступен", "Краткое содержание недоступно"
     except Exception as e:
-        logging.error(f"Общая ошибка: {e}")
-        return "Перевод недоступен", "Краткое содержание недоступно"
+        logging.error(f"Ошибка при переводе заголовка: {e}")
+        return None
 
 if __name__ == "__main__":
     clean_old_entries()

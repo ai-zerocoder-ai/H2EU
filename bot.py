@@ -11,7 +11,7 @@ import logging
 
 # Настройка логирования
 logging.basicConfig(
-    level=logging.DEBUG,  # Установите уровень на DEBUG для подробных логов
+    level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler("bot.log", encoding='utf-8'),
@@ -22,9 +22,8 @@ logging.basicConfig(
 # Загрузка токена бота из .env
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
-GROUP_ID = os.getenv("GROUP_ID")  # ID Telegram-группы, куда отправлять новости
+GROUP_ID = os.getenv("GROUP_ID")
 
-# Проверка загрузки переменных
 if not TOKEN or not GROUP_ID:
     logging.error("BOT_TOKEN или GROUP_ID не установлены в .env файле.")
     exit(1)
@@ -33,11 +32,9 @@ else:
 
 bot = telebot.TeleBot(TOKEN)
 
-# CSV файл с новостями
 csv_file = 'news.csv'
-sent_news_file = 'sent_news.txt'  # Файл для хранения отправленных data_key
+sent_news_file = 'sent_news.txt'
 
-# Загружаем уже отправленные новости
 if os.path.exists(sent_news_file):
     try:
         with open(sent_news_file, 'r', encoding='utf-8') as f:
@@ -50,7 +47,6 @@ else:
     sent_news = set()
     logging.info("Файл sent_news.txt не найден. Начинаем с пустого набора отправленных новостей.")
 
-# Функция отправки новостей в группу
 def publish_news():
     global sent_news
 
@@ -64,13 +60,11 @@ def publish_news():
         logging.error(f"Ошибка при получении новостей: {e}")
         return
 
-    # Считываем все новости из CSV и отправляем те, которые еще не были отправлены
     new_news = []
     try:
         with open(csv_file, 'r', encoding='utf-8') as file:
             reader = csv.DictReader(file)
             for row in reader:
-                logging.debug(f"Обрабатываем статью: {row['title']} ({row['parsed_date']})")
                 if row['data_key'] not in sent_news:
                     new_news.append(row)
     except Exception as e:
@@ -83,13 +77,17 @@ def publish_news():
         logging.info("✅ Новых новостей нет.")
         return
 
-    # Отправляем новые новости в группу
     for news in new_news:
+        title = news['title']
         translated_title = news['translated_title']
-        summary = news['summary']
         post_url = news['post_url']
 
-        # Создаем кнопку для открытия оригинала статьи
+        message_text = (
+            f"📰 <b>{title}</b>\n\n"
+            f"{translated_title}\n\n"
+            f"<a href='{post_url}'>Читать оригинал</a>"
+        )
+
         markup = InlineKeyboardMarkup()
         webapp_button = InlineKeyboardButton(
             text="🔗 Оригинал статьи",
@@ -97,13 +95,8 @@ def publish_news():
         )
         markup.add(webapp_button)
 
-        # Формируем текст сообщения с использованием HTML
-        message_text = f"📰 <b>{translated_title}</b>\n\n{summary}\n\n<a href='{post_url}'>Читать оригинал</a>"
-        if len(message_text) > 4096:
-            message_text = message_text[:4093] + "..."
-
         try:
-            logging.debug(f"Попытка отправки новости: {translated_title}")
+            logging.debug(f"Попытка отправки новости: {title}")
             bot.send_message(
                 GROUP_ID,
                 message_text,
@@ -111,58 +104,28 @@ def publish_news():
                 disable_web_page_preview=False,
                 reply_markup=markup
             )
-            logging.info(f"✅ Новость отправлена: {translated_title}")
-            sent_news.add(news['data_key'])  # Добавляем только после успешной отправки
+            logging.info(f"✅ Новость отправлена: {title}")
+            sent_news.add(news['data_key'])
 
-            # Сохраняем `sent_news.txt` сразу после отправки
             with open(sent_news_file, 'a', encoding='utf-8') as f:
                 f.write(f"{news['data_key']}\n")
-            logging.debug(f"Добавлен data_key в sent_news.txt: {news['data_key']}")
-
-        except telebot.apihelper.ApiException as api_err:
-            if api_err.result.status_code == 429:
-                retry_after = int(api_err.result.json().get('parameters', {}).get('retry_after', 1))
-                logging.error(f"❌ API ошибка 429: Too Many Requests. Повторная попытка через {retry_after} секунд.")
-                time.sleep(retry_after)
-                # Повторная попытка отправки сообщения
-                try:
-                    bot.send_message(
-                        GROUP_ID,
-                        message_text,
-                        parse_mode='HTML',
-                        disable_web_page_preview=False,
-                        reply_markup=markup
-                    )
-                    logging.info(f"✅ Новость отправлена после ожидания: {translated_title}")
-                    sent_news.add(news['data_key'])
-                    with open(sent_news_file, 'a', encoding='utf-8') as f:
-                        f.write(f"{news['data_key']}\n")
-                    logging.debug(f"Добавлен data_key в sent_news.txt после повторной попытки: {news['data_key']}")
-                except Exception as e:
-                    logging.error(f"❌ Не удалось отправить новость после ожидания: {translated_title}. Ошибка: {e}")
-            else:
-                logging.error(f"❌ API ошибка при отправке новости '{translated_title}': {api_err}")
         except Exception as e:
-            logging.error(f"❌ Неизвестная ошибка при отправке новости '{translated_title}': {e}")
+            logging.error(f"❌ Ошибка при отправке новости '{title}': {e}")
 
-        # Задержка между отправками для предотвращения блокировок
-        time.sleep(3)  # Увеличьте задержку до 3 секунд
+        time.sleep(3)
 
     logging.info(f"✅ Сохранены отправленные новости: {len(sent_news)} записей.")
 
-# Периодическая проверка новостей
 schedule.every(60).minutes.do(publish_news)
 
 if __name__ == "__main__":
     logging.info("🤖 Бот запущен и готов публиковать новости.")
-    # Отправляем тестовое сообщение при запуске
     try:
         bot.send_message(GROUP_ID, "🤖 Бот запущен и начал мониторинг новостей.")
         logging.info("✅ Тестовое сообщение отправлено.")
     except Exception as e:
         logging.error(f"❌ Ошибка отправки тестового сообщения: {e}")
 
-    # Вызов publish_news() для немедленной проверки
     logging.info("🔧 Выполнение тестового вызова publish_news()...")
     publish_news()
 
